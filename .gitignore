@@ -1,0 +1,20 @@
+# 运行产物
+__pycache__/
+*.py[cod]
+*.spec
+build/
+dist/
+
+# 本地虚拟环境
+.venv/
+venv/
+env/
+
+# 真实配置（含 API Key，禁止提交）
+config.json
+
+# 个人知识库（简历等隐私资料，禁止提交）
+knowledge/profile.md
+
+# 本地语音模型（体积大，按教程自行下载）
+models/

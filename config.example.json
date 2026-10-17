@@ -1,0 +1,67 @@
+{
+  "text_api": {
+    "base_url": "https://api.deepseek.com/v1",
+    "api_key": "",
+    "model": "deepseek-v4-pro",
+    "temperature": 0.4
+  },
+  "vision_api": {
+    "base_url": "https://api.deepseek.com/v1",
+    "api_key": "",
+    "model": "deepseek-flash",
+    "temperature": 0.2
+  },
+  "asr_api": {
+    "base_url": "https://api.siliconflow.cn/v1",
+    "api_key": "",
+    "model": "FunAudioLLM/SenseVoiceSmall",
+    "language": "zh"
+  },
+  "asr_local": {
+    "enabled": true,
+    "model": "small",
+    "device": "cpu",
+    "compute_type": "int8",
+    "download_root": "models/whisper",
+    "hf_endpoint": "https://hf-mirror.com"
+  },
+  "audio": {
+    "source": "loopback",
+    "chunk_seconds": 4,
+    "samplerate": 16000,
+    "silence_rms": 0.003
+  },
+  "capture": {
+    "mode": "window"
+  },
+  "answer": {
+    "auto": true,
+    "question_only": true,
+    "debounce_seconds": 1.5,
+    "min_new_chars": 8,
+    "max_context_chars": 4000
+  },
+  "ui": {
+    "opacity": 0.94,
+    "font_size": 14,
+    "width": 580,
+    "height": 460,
+    "x": null,
+    "y": null
+  },
+  "hotkeys": {
+    "toggle_overlay": "ctrl+alt+h",
+    "screenshot": "ctrl+alt+s",
+    "toggle_listen": "ctrl+alt+l",
+    "answer_now": "ctrl+alt+enter",
+    "quit": "ctrl+alt+shift+q"
+  },
+  "prompts": {
+    "interview": "你是我的面试实时助手。下面是一段会议软件捕获的实时转写，可能同时包含多位说话人（面试官、其他面试官、HR，甚至我自己的声音）。\n\n请只针对“面试官最近向我提出的那个问题”作答；其他人的闲聊、我的发言、以及不是问题的内容都不要回答，直接只输出“（等待问题）”。\n\n要求：\n1. 用第一人称中文，口语化，控制在 30 秒内（约 120-180 字）；\n2. 先给结论，再给 2-3 个要点，必要时补一个具体例子；\n3. 不要复述问题，不要输出“你可以回答”之类的话；\n4. 必须优先使用我提供的真实资料，不得编造项目、公司、学历、数据；资料里没有的，用保守表述并提示我补充；\n5. 技术问题给出关键思路即可，不要写大段代码。",
+    "exam": "你是笔试/在线测评助手。用户会给你一张题目截图。\n\n请：\n1. 先用一句话复述题目在问什么，便于用户确认；\n2. 给出最终答案：选择题只给选项和答案，编程题给完整可运行代码；\n3. 再给简要解析，不超过 5 行；\n4. 如果截图不清晰或信息不足，明确说明缺少什么，不要编造。"
+  },
+  "knowledge": {
+    "enabled": true,
+    "max_chars": 12000
+  }
+}
