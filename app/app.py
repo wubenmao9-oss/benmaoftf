@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -28,10 +29,20 @@ from .workers import (
 
 WAIT_MARKERS = {"等待问题", "等待问题中", "暂无问题"}
 
+# 面试官一直连续说话时，最多把自动回答顺延这么久，避免永远等不到停顿
+MAX_DEFER_SECONDS = 6.0
+
 # 本地粗筛“这句像不像面试官在提问”，命中才调用大模型，省 token 也少误答
 QUESTION_HINTS = (
     "?",
     "？",
+    "你好",
+    "您好",
+    "欢迎参加",
+    "准备好了",
+    "我们开始",
+    "开始面试",
+    "带领你",
     "什么",
     "怎么",
     "怎样",
@@ -58,11 +69,6 @@ QUESTION_HINTS = (
     "举个",
     "举例",
     "区别",
-    "原理",
-    "实现",
-    "思路",
-    "方案",
-    "场景",
     "你负责",
     "你做过",
     "你用过",
@@ -78,6 +84,15 @@ QUESTION_HINTS = (
     "多久",
     "吗",
     "呢",
+    "what",
+    "how",
+    "why",
+    "can you",
+    "could you",
+    "tell me",
+    "introduce",
+    "describe",
+    "explain",
 )
 
 
@@ -85,7 +100,8 @@ def looks_like_question(text: str) -> bool:
     tail = (text or "").strip()[-160:]
     if not tail:
         return False
-    return any(hint in tail for hint in QUESTION_HINTS)
+    lowered = tail.lower()
+    return any(hint in lowered for hint in QUESTION_HINTS)
 
 
 class CopilotApp(QObject):
@@ -107,6 +123,8 @@ class CopilotApp(QObject):
 
         self.transcript = ""
         self._last_answered_len = 0
+        self._answer_submit_len = 0
+        self._answer_defer_start: Optional[float] = None
         self._answering = False
         self._pending_answer = False
         self._listening = False
@@ -403,6 +421,7 @@ class CopilotApp(QObject):
         self._listening = False
         self.remote_state.set_listening(False)
         self._answer_timer.stop()
+        self._answer_defer_start = None
 
         if self.audio is not None:
             worker = self.audio
@@ -455,6 +474,17 @@ class CopilotApp(QObject):
 
         if not self.config["answer"].get("auto", True):
             return
+        delay = max(200, int(float(self.config["answer"].get("debounce_seconds", 1.5)) * 1000))
+        now = time.monotonic()
+        if self._answer_timer.isActive():
+            started = self._answer_defer_start
+            if started is None or now - started < MAX_DEFER_SECONDS:
+                # 面试官还在继续说：顺延计时，等这半句说完再答
+                if started is None:
+                    self._answer_defer_start = now
+                self._answer_timer.start(delay)
+            # 超过上限不再顺延，让计时器到点回答，避免对方一直说就永远不回答
+            return
         new_chars = len(self.transcript) - self._last_answered_len
         if new_chars < int(self.config["answer"].get("min_new_chars", 8)):
             return
@@ -463,10 +493,12 @@ class CopilotApp(QObject):
             fresh = self.transcript[self._last_answered_len :].strip()
             if not looks_like_question(fresh[-160:]):
                 return
-        delay = int(float(self.config["answer"].get("debounce_seconds", 1.5)) * 1000)
-        self._answer_timer.start(max(200, delay))
+        self._answer_defer_start = now
+        self._answer_timer.start(delay)
 
     def request_answer(self, force: bool = False) -> None:
+        self._answer_timer.stop()
+        self._answer_defer_start = None
         if self._answering:
             self._pending_answer = True
             return
@@ -520,6 +552,7 @@ class CopilotApp(QObject):
 
         self._answering = True
         self._pending_answer = False
+        self._answer_submit_len = len(self.transcript)
         self._overlay_begin("正在生成回答…")
         self.remote_state.begin_answer("interview")
         self.answer_worker.submit(self.transcript)
@@ -531,15 +564,17 @@ class CopilotApp(QObject):
 
     def on_answer_completed(self, text: str) -> None:
         self._answering = False
-        self._last_answered_len = len(self.transcript)
         compact = (text or "").strip().strip("。.！!？?（）()")
         if compact in WAIT_MARKERS:
+            # 模型认为这段还构不成问题：不推进已答位置，等后面内容更完整时再答
             self.remote_state.drop_answer()
             if not self._phone_active:
                 self.overlay.clear()
                 self.overlay.set_status("等待问题")
             self.set_status("暂无新问题")
         else:
+            # 只标记提交回答时已有的内容；生成期间新说的话要留到下一次触发
+            self._last_answered_len = max(self._last_answered_len, self._answer_submit_len)
             self.remote_state.end_answer()
             if not self._phone_active:
                 self.overlay.finish()
@@ -553,6 +588,9 @@ class CopilotApp(QObject):
         self.remote_state.end_answer(message)
         self._overlay_error(message)
         self.set_status(f"回答失败：{message}")
+        if self._pending_answer:
+            self._pending_answer = False
+            QTimer.singleShot(600, lambda: self.request_answer(force=True))
 
     def _capture_mode(self) -> str:
         mode = str((self.config.get("capture") or {}).get("mode", "window"))

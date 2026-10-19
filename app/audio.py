@@ -54,6 +54,12 @@ class AudioCapture(QThread):
         speaker = sc.default_speaker()
         if speaker is None:
             raise RuntimeError("没有找到默认扬声器，无法采集系统声音")
+        # 蓝牙耳机等设备会同时暴露同名的「麦克风」和「回环」两个端点，
+        # get_microphone 按名字匹配时会拿到麦克风（录到的是房间声音，不是系统播放的声音）。
+        # 这里必须显式挑 isloopback 的那个。
+        for device in sc.all_microphones(include_loopback=True):
+            if getattr(device, "isloopback", False) and device.name == speaker.name:
+                return device
         device = sc.get_microphone(id=str(speaker.name), include_loopback=True)
         if device is None:
             raise RuntimeError(

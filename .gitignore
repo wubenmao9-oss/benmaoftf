@@ -18,3 +18,13 @@ knowledge/profile.md
 
 # 本地语音模型（体积大，按教程自行下载）
 models/
+
+# 本地打包产物（exe/zip 走 GitHub Releases，不进仓库）
+release/
+
+# 宣传视频素材与成片（录屏、配音、渲染结果）
+tools/promo/clips/
+tools/promo/audio/
+tools/promo/out/
+tools/promo/_selftest/
+tools/promo/bgm.mp3

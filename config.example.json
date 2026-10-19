@@ -15,7 +15,7 @@
     "base_url": "https://api.siliconflow.cn/v1",
     "api_key": "",
     "model": "FunAudioLLM/SenseVoiceSmall",
-    "language": "zh"
+    "language": ""
   },
   "asr_local": {
     "enabled": true,

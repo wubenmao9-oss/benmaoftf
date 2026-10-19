@@ -224,7 +224,10 @@ class OverlayWindow(QWidget):
 
     def geometry_config(self) -> Dict[str, Any]:
         geo = self.geometry()
-        data: Dict[str, Any] = {"width": geo.width(), "height": geo.height()}
+        data: Dict[str, Any] = {
+            "width": geo.width(),
+            "height": geo.height(),
+        }
         if self._placed:
             data["x"] = geo.x()
             data["y"] = geo.y()
