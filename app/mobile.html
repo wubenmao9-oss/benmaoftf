@@ -43,6 +43,7 @@
   .msg.sys { margin-left: auto; margin-right: auto; max-width: 100%; background: #191d27;
     color: #8b93a7; font-size: 12px; text-align: center; border-radius: 8px; }
   .tag { display: block; font-size: 11px; color: #7f8ba6; margin-bottom: 5px; }
+  .q { font-size: 12px; color: #8b93a7; line-height: 1.5; margin-bottom: 6px; }
   .typing { color: #6ea8ff; }
   .err { color: #f87171; font-size: 12px; margin-top: 4px; }
   .badge { display: flex; align-items: center; gap: 10px; padding: 2px 0 2px; }
@@ -72,6 +73,10 @@
     padding: 8px 14px; border-radius: 8px; font-size: 13px; opacity: 0;
     transition: opacity .2s; pointer-events: none; z-index: 9; }
   #toast.show { opacity: 1; }
+  .hint { margin: 0 0 10px; padding: 10px 12px; border-radius: 10px;
+    background: linear-gradient(160deg, #223b2c, #182a20); border: 1px solid #35624a; }
+  .hint .label { font-size: 11px; color: #86c79e; margin-bottom: 4px; }
+  .hint .say { font-size: 17px; font-weight: 600; line-height: 1.5; color: #d8f5e2; }
 </style>
 </head>
 <body>
@@ -89,6 +94,7 @@
     <summary>实时转写</summary>
     <pre id="transcript">（尚未开始监听）</pre>
   </details>
+  <div id="hintBox" class="hint" style="display:none"></div>
   <div id="answers"></div>
 </main>
 <footer>
@@ -207,14 +213,24 @@
 
     var answers = state.answers || [];
     var sig = answers.map(function (a) {
-      return a.id + ':' + a.text.length + ':' + (a.done ? 1 : 0) + ':' + a.error;
+      return a.id + ':' + a.text.length + ':' + (a.done ? 1 : 0) + ':' + a.error + ':' + (a.q || '').length;
     }).join('|');
-    sig += '|' + shots + '|' + (state.auto ? 1 : 0);
+    sig += '|' + shots + '|' + (state.auto ? 1 : 0) + '|' + (state.hint || '');
     if (sig === lastSig) return;
     lastSig = sig;
 
     var main = document.getElementById('main');
     nearBottom = main.scrollHeight - main.scrollTop - main.clientHeight < 100;
+
+    var hintBox = document.getElementById('hintBox');
+    if (state.hint) {
+      hintBox.style.display = '';
+      hintBox.innerHTML = '<div class="label">AI 正在识别，先垫一句</div>'
+        + '<div class="say">' + esc(state.hint) + '</div>';
+    } else {
+      hintBox.style.display = 'none';
+      hintBox.innerHTML = '';
+    }
 
     var box = document.getElementById('answers');
     box.innerHTML = '';
@@ -227,6 +243,12 @@
     answers.forEach(function (a) {
       var wrap = document.createElement('div');
       wrap.className = 'msg ai';
+      if (a.q) {
+        var q = document.createElement('div');
+        q.className = 'q';
+        q.textContent = '问：' + a.q.replace(/\s+/g, ' ').slice(0, 120);
+        wrap.appendChild(q);
+      }
       var tag = document.createElement('span');
       tag.className = 'tag';
       tag.textContent = a.kind === 'exam' ? 'AI 答题' : 'AI 回答';

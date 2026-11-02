@@ -4,6 +4,7 @@ __pycache__/
 *.spec
 build/
 dist/
+dist_*/
 
 # 本地虚拟环境
 .venv/
@@ -13,8 +14,11 @@ env/
 # 真实配置（含 API Key，禁止提交）
 config.json
 
-# 个人知识库（简历等隐私资料，禁止提交）
-knowledge/profile.md
+# 个人知识库（简历、公司资料等隐私内容，禁止提交）
+knowledge/
+
+# 保存的题目笔记（含面试内容，禁止提交）
+notes/
 
 # 本地语音模型（体积大，按教程自行下载）
 models/

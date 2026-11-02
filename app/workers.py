@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import queue
+import threading
 from typing import Optional
 
 from PySide6.QtCore import QThread, Signal
@@ -64,6 +65,7 @@ class AnswerWorker(QThread):
         system_prompt: str,
         temperature: float = 0.4,
         max_context_chars: int = 4000,
+        max_tokens: int = 260,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -71,17 +73,27 @@ class AnswerWorker(QThread):
         self.system_prompt = system_prompt
         self.temperature = temperature
         self.max_context_chars = max_context_chars
-        self._queue: "queue.Queue[Optional[str]]" = queue.Queue()
+        # 回答本来就要求 50~85 字，限一个上限，避免模型跑题越写越长
+        self.max_tokens = max_tokens
+        self._queue: "queue.Queue" = queue.Queue()
         self._running = True
+        # 代次：每次取消或提交新问题就 +1，正在跑的流发现代次变了就立刻停
+        self._generation = 0
 
-    def submit(self, transcript: str) -> None:
+    def cancel(self) -> None:
+        """打断当前生成：让正在跑的流立刻停下，半截回答直接丢弃。"""
+        self._generation += 1
+
+    def submit(self, transcript: str, focus: str = "", tolerant: bool = False) -> None:
         while True:
             try:
                 self._queue.get_nowait()
             except queue.Empty:
                 break
         if self._running:
-            self._queue.put(transcript)
+            # 提交新问题时顺带作废正在生成的那一条，避免旧回答继续往外蹦
+            self._generation += 1
+            self._queue.put((transcript, focus, tolerant))
 
     def stop(self) -> None:
         self._running = False
@@ -90,36 +102,66 @@ class AnswerWorker(QThread):
     def run(self) -> None:
         while self._running:
             try:
-                transcript = self._queue.get(timeout=0.3)
+                item = self._queue.get(timeout=0.3)
             except queue.Empty:
                 continue
-            if transcript is None:
+            if item is None:
                 break
+            transcript, focus, tolerant = item
+            generation = self._generation
             context = transcript[-self.max_context_chars :]
+            focus = (focus or "").strip()
+            if tolerant:
+                # 转写常有错字、重复字和错误断句：让模型按大意回答，不要再说“等待问题”
+                user_text = (
+                    "下面是最近的面试对话转写（按时间顺序，可能有错字或断句错误）：\n\n"
+                    f"{context}\n\n"
+                    "【最后这段内容就是要我回答的问题】\n"
+                    f"{focus[-300:]}\n\n"
+                    "请忽略转写里的重复字、错字和断句错误，按最接近的意思直接给出我可以说出口的回答。"
+                    "不要输出“等待问题”，不要解释，直接说答案。"
+                )
+            elif focus:
+                user_text = (
+                    "下面是最近的面试对话转写（按时间顺序）：\n\n"
+                    f"{context}\n\n"
+                    "【只需要回答最后这一个问题】\n"
+                    f"{focus[-300:]}\n\n"
+                    "前面的内容只当背景，不要重复回答，也不要重复已经说过的自我介绍。"
+                    "直接给出我接下来要说的话。"
+                )
+            else:
+                user_text = (
+                    "下面是最近的面试对话转写（按时间顺序）：\n\n"
+                    f"{context}\n\n"
+                    "请判断面试官最近的问题，并直接给出我接下来要说的话。"
+                )
             messages = [
                 {"role": "system", "content": self.system_prompt},
-                {
-                    "role": "user",
-                    "content": (
-                        "下面是最近的面试对话转写（按时间顺序）：\n\n"
-                        f"{context}\n\n"
-                        "请判断面试官最近的问题，并直接给出我接下来要说的话。"
-                    ),
-                },
+                {"role": "user", "content": user_text},
             ]
+            cancelled = False
             try:
                 self.answer_started.emit()
                 parts = []
                 for token in self.client.stream_chat(
-                    messages, temperature=self.temperature
+                    messages,
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens,
                 ):
                     if not self._running:
                         break
+                    if generation != self._generation:
+                        # 已经被新问题顶掉，静默丢弃这条回答
+                        cancelled = True
+                        break
                     parts.append(token)
                     self.delta.emit(token)
-                self.completed.emit("".join(parts))
+                if not cancelled:
+                    self.completed.emit("".join(parts))
             except Exception as exc:
-                self.failed.emit(str(exc))
+                if generation == self._generation:
+                    self.failed.emit(str(exc))
 
 
 class VisionWorker(QThread):

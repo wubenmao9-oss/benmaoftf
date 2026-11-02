@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import requests
@@ -25,6 +26,15 @@ class OpenAICompatibleClient:
         self.api_key = api_key or ""
         self.model = model or ""
         self.timeout = timeout
+        # 每个线程一个 Session，复用 TCP/TLS 连接，省掉每次请求的握手时间
+        self._local = threading.local()
+
+    def _session(self) -> requests.Session:
+        session = getattr(self._local, "session", None)
+        if session is None:
+            session = requests.Session()
+            self._local.session = session
+        return session
 
     def _url(self, path: str) -> str:
         return f"{self.base_url}{path}"
@@ -55,7 +65,7 @@ class OpenAICompatibleClient:
         if max_tokens:
             payload["max_tokens"] = max_tokens
 
-        with requests.post(
+        with self._session().post(
             self._url("/chat/completions"),
             headers=self._headers(),
             json=payload,
@@ -105,7 +115,7 @@ class OpenAICompatibleClient:
             data["prompt"] = prompt
 
         def post(payload: Dict[str, str]) -> requests.Response:
-            return requests.post(
+            return self._session().post(
                 self._url("/audio/transcriptions"),
                 headers={"Authorization": f"Bearer {self.api_key}"},
                 files={"file": ("chunk.wav", wav_bytes, "audio/wav")},

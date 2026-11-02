@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtGui import QFont, QGuiApplication, QTextCursor
@@ -28,6 +28,8 @@ class OverlayWindow(QWidget):
 
         self._config = config
         self._buffer = ""
+        # 保留最近几条回答，新回答接在下面，避免刷掉正在看的内容
+        self._history: List[str] = []
         self._dirty = False
         self._drag_offset = None
         self._placed = False
@@ -181,9 +183,13 @@ class OverlayWindow(QWidget):
             self.show_overlay()
 
     def begin(self, status: str) -> None:
+        # 上一轮回答保留在上面，新一轮从下面接着写，不覆盖正在看的内容
+        if self._buffer.strip():
+            self._history.append(self._buffer.strip())
+            self._history = self._history[-3:]
         self._buffer = ""
-        self._dirty = False
-        self.view.clear()
+        self._dirty = True
+        self._flush()
         self.set_status(status)
         self.show_overlay()
 
@@ -208,19 +214,38 @@ class OverlayWindow(QWidget):
 
     def clear(self) -> None:
         self._buffer = ""
+        self._history.clear()
         self._dirty = False
         self.view.clear()
         self.set_status("待命")
+
+    def discard_current(self) -> None:
+        """丢掉本轮（例如模型判定“等待问题”），但保留之前的回答。"""
+        self._buffer = ""
+        self._dirty = True
+        self._flush()
+        self.set_status("等待问题")
 
     def _flush(self) -> None:
         if not self._dirty:
             return
         self._dirty = False
-        self.view.setMarkdown(self._buffer)
-        cursor = self.view.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.End)
-        self.view.setTextCursor(cursor)
-        self.view.ensureCursorVisible()
+
+        blocks = [block for block in self._history if block.strip()]
+        if self._buffer.strip():
+            blocks.append(self._buffer)
+        text = "\n\n---\n\n".join(blocks)
+
+        bar = self.view.verticalScrollBar()
+        at_bottom = bar.maximum() == 0 or bar.value() >= bar.maximum() - 4
+        old_value = bar.value()
+
+        self.view.setMarkdown(text)
+        if at_bottom:
+            bar.setValue(bar.maximum())
+        else:
+            # 用户正往回看旧回答时不要把他拽回底部
+            bar.setValue(min(old_value, bar.maximum()))
 
     def geometry_config(self) -> Dict[str, Any]:
         geo = self.geometry()

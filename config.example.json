@@ -2,7 +2,7 @@
   "text_api": {
     "base_url": "https://api.deepseek.com/v1",
     "api_key": "",
-    "model": "deepseek-v4-pro",
+    "model": "deepseek-chat",
     "temperature": 0.4
   },
   "vision_api": {
@@ -24,6 +24,14 @@
     "compute_type": "int8",
     "download_root": "models/whisper",
     "hf_endpoint": "https://hf-mirror.com"
+  },
+  "asr_stream": {
+    "enabled": true,
+    "model_dir": "models/sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30",
+    "num_threads": 2,
+    "endpoint_silence_ms": 180,
+    "endpoint_grace_ms": 200,
+    "min_speech_ms": 200
   },
   "audio": {
     "source": "loopback",

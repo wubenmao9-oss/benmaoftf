@@ -10,7 +10,8 @@
 
 | 功能 | 说明 |
 | --- | --- |
-| 实时转写 | 采集系统回环音频（腾讯会议、飞书、Zoom 等），本地 faster-whisper 离线转写，也可切在线 ASR |
+| 实时转写 | 采集系统回环音频（腾讯会议、飞书、Zoom 等），本地 sherpa-onnx 流式离线转写，停顿就提交，边听边出字 |
+| 新用户初始化 | 一键下载本地语音识别包（带进度条、断点续传、自动换镜像），下完自动检测 Key / 模型 / 音频设备 |
 | 面试回答 | 只针对“面试官最近提出的问题”作答，先给结论再给要点，默认 30 秒口播长度 |
 | 提问筛选 | 本地关键词粗判“像不像提问”，命中才调用大模型，省 token、少误答 |
 | 截图识题 | 三种范围：只截当前活动窗口 / 手动框选 / 整个桌面；支持多张截图合并提交 |
@@ -41,7 +42,18 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-### 2. 配置 API Key
+### 2. 新用户初始化（推荐）
+
+启动后打开「模型与音频」标签页，点「一键初始化」：
+
+1. 选语音识别包：默认「中文高精度（2025 版，约 160 MB）」；英文面试多就选「中英双语（2023 版）」；
+2. 点「开始下载」，进度条会显示已下载 / 总大小；默认走 `hf-mirror.com` 国内镜像，失败会自动换官方源，支持断点续传；
+3. 下载完成会自动检测：配置文件、文本模型 Key、语音模型文件、sherpa-onnx、音频设备、个人知识库；
+4. 检测结果里标「需处理」的项按提示补齐即可。
+
+也可以随时点「检测运行环境」只看检测结果。模型只下载到 `models/` 下，不会覆盖已有模型和配置。
+
+### 3. 配置 API Key
 
 把示例配置复制成真实配置，然后填 Key：
 
@@ -62,7 +74,7 @@ Copy-Item config.example.json config.json
 
 > `config.json` 已经在 `.gitignore` 里，不要提交到任何仓库。
 
-### 3. 准备个人知识库
+### 4. 准备个人知识库
 
 打开界面「知识库」标签页，把你的真实经历写进去；或直接编辑：
 
@@ -73,13 +85,7 @@ knowledge/profile.md
 建议写：教育背景、工作经历、每个项目的「背景 / 我负责的部分 / 技术选型 / 难点 / 结果数据」、掌握的技能与熟练度、不擅长的地方。
 资料里没有的内容，模型会保守表述并提示补充，而不是编造。
 
-> `knowledge/profile.md` 同样在 `.gitignore` 里，属于隐私内容。
-
-### 4. 本地语音识别模型（可选）
-
-默认使用本地 faster-whisper（`small` + `int8`），首次转写会自动下载到 `models/whisper`。
-国内网络可在配置里保留 `asr_local.hf_endpoint`（默认 `https://hf-mirror.com`）。
-如果不想下载模型，把 `asr_local.enabled` 改成 `false`，并在「模型与音频」里配置在线 ASR。
+> 整个 `knowledge/` 目录都在 `.gitignore` 里，属于隐私内容。
 
 ### 5. 启动
 
@@ -89,12 +95,39 @@ python main.py
 
 启动后主窗口出现，同时在系统托盘常驻。重复双击只会提示“程序已经在运行”，不会开第二个实例。
 
+> 默认用本地流式识别（sherpa-onnx），不消耗 API；没下载模型时程序仍能启动，点「一键初始化」补齐即可。
+> 旧的 faster-whisper 备用转写仍然保留，首次使用会自动下载到 `models/whisper`。
+
+---
+
+## 分享给别人
+
+仓库里只有源码：模型、API Key、知识库都不会进版本库，所以别人 clone 下来得到的是完整功能，不会变成“阉割版”，只要按「新用户初始化」补齐模型和 Key 即可。
+
+两种分享方式：
+
+### A. 直接发打包好的程序（对方不用装 Python）
+
+```powershell
+python build.py --share
+```
+
+分享版会清空 API Key、不带 `knowledge/`（避免泄露你的简历）、不带 `models/`（体积小）。对方双击 exe 后点「一键初始化」自己下载模型、填自己的 Key，再点「检测运行环境」确认。
+
+把 `dist/笨猫面试助手/` 压成 zip 发出去，或上传到 GitHub Releases 即可。
+
+### B. 发源码仓库
+
+对方 clone 后按上面的「快速开始」装依赖、点「一键初始化」、填 Key。
+
+> 日常自己用的打包请用 `python build.py`（会带上你的配置、知识库和模型），这个包不要直接发给别人。
+
 ---
 
 ## 界面说明
 
 - **控制**：开始/停止监听、截图识题、手动回答、悬浮窗、手机远程；下面是自动回答开关、提问筛选开关、截图范围选择。
-- **模型与音频**：文本模型、视觉模型、在线 ASR、本地 ASR、回环音频参数。
+- **模型与音频**：一键初始化（下载语音包 + 检测环境）、文本模型、视觉模型、在线 ASR、本地 ASR、回环音频参数。
 - **知识库**：编辑并保存 `knowledge/profile.md`。
 - **提示词**：面试回答与笔试识题的系统提示词，可自行改写风格。
 
@@ -150,12 +183,13 @@ python main.py
 
 ```powershell
 pip install pyinstaller
-python build.py
+python build.py            # 自己用：带配置、知识库、模型
+python build.py --share    # 分享给别人：Key 清空，不带知识库和模型
 ```
 
 产物：`dist/笨猫面试助手/笨猫面试助手.exe`。
 
-打包脚本会自动把 `config.json`、`knowledge/`、`models/` 复制到 exe 同级目录，整个文件夹拷走即可直接用。
+普通打包会自动把 `config.json`、`knowledge/`、`models/` 复制到 exe 同级目录，整个文件夹拷走即可直接用。
 注意：重新打包会重建 `dist/笨猫面试助手`，如果你在 exe 里改过配置，重打包后需要重新填一次。
 
 ---
@@ -166,7 +200,8 @@ python build.py
 A：确认「模型与音频」里音频源是 `loopback`，且会议软件正在出声；把 `silence_rms` 调小（例如 `0.001`）可以提高灵敏度。首次使用本地模型需要等它下载完成。
 
 **Q：模型下载很慢或失败？**
-A：保留 `asr_local.hf_endpoint` 为 `https://hf-mirror.com`，或手动把模型放到 `models/whisper/faster-whisper-small/`（目录里要有 `model.bin`）。
+A：点「一键初始化」会自动走 `hf-mirror.com`，失败再换官方源并重试 3 次；浏览器有代理时先确认代理没拦 `.onnx` 下载。也可以手动把模型放到 `models/sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30/`（需要 `tokens.txt`、`encoder*.onnx`、`decoder*.onnx`、`joiner*.onnx`）。
+旧的 faster-whisper 备用模型放在 `models/whisper/faster-whisper-small/`（目录里要有 `model.bin`）。
 
 **Q：截图截到了助手自己？**
 A：截图前助手会先隐藏面板和悬浮窗再截，正常不会截到自己。如果仍出现，检查是否把「截图范围」设成了「整个桌面」，并改用「只截当前活动窗口」。

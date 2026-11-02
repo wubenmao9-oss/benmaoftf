@@ -11,6 +11,8 @@ from urllib.parse import parse_qs, urlparse
 
 from PySide6.QtCore import QObject, Signal
 
+from .hints import pick_hint
+
 MOBILE_PAGE = Path(__file__).resolve().parent / "mobile.html"
 
 
@@ -41,6 +43,8 @@ class RemoteState:
         self._transcript = ""
         self._answers: List[Dict[str, Any]] = []
         self._answer_id = 0
+        # 识别中 / 等答案时先给用户一句可以开口的垫话
+        self._hint = ""
 
     def set_status(self, text: str) -> None:
         with self._lock:
@@ -64,11 +68,28 @@ class RemoteState:
             if len(self._transcript) > 8000:
                 self._transcript = self._transcript[-8000:]
 
-    def begin_answer(self, kind: str) -> None:
+    def set_hint(self) -> None:
+        """识别中或等答案时，给手机端一句可以先开口的垫话。"""
+        with self._lock:
+            if not self._hint:
+                self._hint = pick_hint()
+
+    def clear_hint(self) -> None:
+        with self._lock:
+            self._hint = ""
+
+    def begin_answer(self, kind: str, question: str = "") -> None:
         with self._lock:
             self._answer_id += 1
             self._answers.append(
-                {"id": self._answer_id, "kind": kind, "text": "", "done": False, "error": ""}
+                {
+                    "id": self._answer_id,
+                    "kind": kind,
+                    "q": (question or "").strip()[-200:],
+                    "text": "",
+                    "done": False,
+                    "error": "",
+                }
             )
             self._answers = self._answers[-20:]
 
@@ -76,11 +97,14 @@ class RemoteState:
         if not text:
             return
         with self._lock:
+            # 答案开始出字了，垫话就该收起
+            self._hint = ""
             if self._answers:
                 self._answers[-1]["text"] += text
 
     def end_answer(self, error: str = "") -> None:
         with self._lock:
+            self._hint = ""
             if self._answers:
                 self._answers[-1]["done"] = True
                 if error:
@@ -89,6 +113,7 @@ class RemoteState:
     def drop_answer(self) -> None:
         """丢弃最后一条尚未结束的回答（例如模型判断为“等待问题”）。"""
         with self._lock:
+            self._hint = ""
             if self._answers and not self._answers[-1]["done"]:
                 self._answers.pop()
 
@@ -98,6 +123,7 @@ class RemoteState:
             self._answers = []
             self._shots = 0
             self._status = "待命"
+            self._hint = ""
 
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:
@@ -108,6 +134,7 @@ class RemoteState:
                 "shots": self._shots,
                 "transcript": self._transcript,
                 "answers": [dict(item) for item in self._answers],
+                "hint": self._hint,
             }
 
 

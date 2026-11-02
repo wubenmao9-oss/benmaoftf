@@ -4,7 +4,7 @@ import copy
 from pathlib import Path
 from typing import Any, Dict
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -27,7 +28,64 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .config import load_knowledge, save_config, save_knowledge
+from .config import (
+    APP_DIR,
+    COMPANY_TEMPLATE,
+    company_path,
+    delete_company,
+    list_companies,
+    load_company,
+    load_knowledge,
+    save_company,
+    save_config,
+    save_knowledge,
+    sanitize_company_name,
+)
+from .llm import OpenAICompatibleClient
+from .setup import (
+    SetupDialog,
+    check_environment,
+    format_results,
+    overall_level,
+    LEVEL_TEXT,
+)
+
+
+class _OptimizeWorker(QThread):
+    """后台把公司原始材料整理成结构化资料，避免阻塞界面。"""
+
+    done = Signal(str)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        client: OpenAICompatibleClient,
+        system: str,
+        material: str,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._client = client
+        self._system = system
+        self._material = material
+
+    def run(self) -> None:
+        try:
+            chunks = []
+            for piece in self._client.stream_chat(
+                [
+                    {"role": "system", "content": self._system},
+                    {"role": "user", "content": self._material},
+                ],
+                max_tokens=900,
+            ):
+                chunks.append(piece)
+            text = "".join(chunks).strip()
+            if not text:
+                raise RuntimeError("模型没有返回内容")
+            self.done.emit(text)
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
 
 
 class ControlPanel(QWidget):
@@ -37,6 +95,7 @@ class ControlPanel(QWidget):
     answer_now = Signal()
     overlay_toggle = Signal()
     remote_toggle = Signal()
+    save_notes = Signal()
     auto_toggled = Signal(bool)
     config_saved = Signal(dict)
 
@@ -44,6 +103,10 @@ class ControlPanel(QWidget):
         super().__init__()
         self._config = copy.deepcopy(config)
         self._syncing_auto = False
+        # 公司下拉框初始化/程序化刷新时不要触发“切换即保存”
+        self._company_loading = False
+        self._company_shown = ""
+        self._optimize_worker: Any = None
         self.setWindowTitle("笨猫面试助手")
         # 窗口可自由缩放；内容放不下时滚动，而不是把控件压扁
         self.setMinimumSize(620, 480)
@@ -155,6 +218,7 @@ class ControlPanel(QWidget):
         answer_btn = QPushButton("立即回答")
         overlay_btn = QPushButton("显示 / 隐藏悬浮窗")
         remote_btn = QPushButton("手机远程")
+        save_note_btn = QPushButton("保存题目笔记")
 
         self.start_btn.clicked.connect(self.start_listen.emit)
         self.stop_btn.clicked.connect(self.stop_listen.emit)
@@ -162,6 +226,7 @@ class ControlPanel(QWidget):
         answer_btn.clicked.connect(self.answer_now.emit)
         overlay_btn.clicked.connect(self.overlay_toggle.emit)
         remote_btn.clicked.connect(self.remote_toggle.emit)
+        save_note_btn.clicked.connect(self.save_notes.emit)
 
         buttons_top = QHBoxLayout()
         for button in (self.start_btn, self.stop_btn, screenshot_btn):
@@ -170,7 +235,7 @@ class ControlPanel(QWidget):
         layout.addLayout(buttons_top)
 
         buttons_bottom = QHBoxLayout()
-        for button in (answer_btn, overlay_btn, remote_btn):
+        for button in (answer_btn, overlay_btn, remote_btn, save_note_btn):
             buttons_bottom.addWidget(button)
         buttons_bottom.addStretch(1)
         layout.addLayout(buttons_bottom)
@@ -185,6 +250,21 @@ class ControlPanel(QWidget):
         self.question_only.setChecked(bool(self._config["answer"].get("question_only", True)))
         options.addWidget(self.question_only)
         layout.addLayout(options)
+
+        practice_box = QGroupBox("练习模式（没有真实面试时，自己当面试官）")
+        practice_layout = QVBoxLayout(practice_box)
+        self.practice_ctrl = QCheckBox("我来当面试官：只听我的麦克风，不听系统声音")
+        self.practice_ctrl.setChecked(self._config["audio"].get("source") == "microphone")
+        self.practice_ctrl.toggled.connect(self._set_practice)
+        practice_layout.addWidget(self.practice_ctrl)
+        self.practice_hint = QLabel(
+            "开启后，你对着麦克风提问，助手把你当成面试官来回答，效果和真实面试一样。"
+            "提示：如果你把自己的答案朗读出来，麦克风也会听到，可能被当成新的提问。"
+        )
+        self.practice_hint.setObjectName("hint")
+        self.practice_hint.setWordWrap(True)
+        practice_layout.addWidget(self.practice_hint)
+        layout.addWidget(practice_box)
 
         capture_row = QHBoxLayout()
         capture_row.addWidget(QLabel("截图范围"))
@@ -223,6 +303,26 @@ class ControlPanel(QWidget):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(14, 14, 14, 14)
+
+        setup_group = QGroupBox("首次使用 / 换电脑（一键初始化）")
+        setup_layout = QVBoxLayout(setup_group)
+        setup_hint = QLabel(
+            "新电脑或刚拿到这个程序：点「一键初始化」自动下载本地语音识别包（带进度条），"
+            "下载完会自动检测 Key、模型和音频设备是否就绪。"
+        )
+        setup_hint.setObjectName("hint")
+        setup_hint.setWordWrap(True)
+        setup_layout.addWidget(setup_hint)
+        setup_row = QHBoxLayout()
+        init_btn = QPushButton("一键初始化")
+        init_btn.clicked.connect(self._open_setup)
+        check_btn = QPushButton("检测运行环境")
+        check_btn.clicked.connect(self._check_environment)
+        setup_row.addWidget(init_btn)
+        setup_row.addWidget(check_btn)
+        setup_row.addStretch(1)
+        setup_layout.addLayout(setup_row)
+        layout.addWidget(setup_group)
 
         text_group = QGroupBox("文本模型（面试回答）")
         text_form = QFormLayout(text_group)
@@ -285,6 +385,11 @@ class ControlPanel(QWidget):
         self.audio_source.addItem("麦克风", "microphone")
         index = self.audio_source.findData(self._config["audio"]["source"])
         self.audio_source.setCurrentIndex(max(0, index))
+        self.audio_source.currentIndexChanged.connect(self._on_source_changed)
+
+        self.stream_model = QComboBox()
+        self._populate_stream_models()
+        audio_form.addRow("识别模型", self.stream_model)
 
         self.chunk_seconds = QDoubleSpinBox()
         self.chunk_seconds.setRange(1.0, 15.0)
@@ -339,13 +444,62 @@ class ControlPanel(QWidget):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(14, 14, 14, 14)
 
+        # ---- 本次面试的公司（每家公司一份，面试前切换）----
+        company_box = QGroupBox("本次面试的公司（每家公司一份）")
+        company_layout = QVBoxLayout(company_box)
+
+        company_hint = QLabel(
+            "面试开始前在这里选好公司，切换后立刻生效。公司资料只在问"
+            "“你了解我们公司吗 / 你了解这个岗位吗”这类问题时使用；"
+            "个人资料才是所有面试共用的底盘。"
+        )
+        company_hint.setObjectName("hint")
+        company_hint.setWordWrap(True)
+        company_layout.addWidget(company_hint)
+
+        company_row = QHBoxLayout()
+        self.company_combo = QComboBox()
+        self.company_combo.setMinimumWidth(160)
+        self.company_combo.currentIndexChanged.connect(self._on_company_changed)
+        company_row.addWidget(self.company_combo, 1)
+        new_btn = QPushButton("新建")
+        new_btn.clicked.connect(self._new_company)
+        delete_btn = QPushButton("删除")
+        delete_btn.clicked.connect(self._delete_company)
+        company_row.addWidget(new_btn)
+        company_row.addWidget(delete_btn)
+        company_layout.addLayout(company_row)
+
+        self.company_edit = QPlainTextEdit()
+        self.company_edit.setPlaceholderText(
+            "把公司简介、招聘 JD、官网介绍或你自己的笔记粘进来，"
+            "点“AI 整理”会自动分成：公司一句话 / 业务与产品 / 岗位理解 / 我的匹配点 / 反问问题。"
+        )
+        self.company_edit.setMinimumHeight(180)
+        company_layout.addWidget(self.company_edit)
+
+        company_btns = QHBoxLayout()
+        self.optimize_btn = QPushButton("AI 整理公司资料")
+        self.optimize_btn.clicked.connect(self._optimize_company)
+        save_company_btn = QPushButton("保存公司资料")
+        save_company_btn.clicked.connect(self._save_company_clicked)
+        company_btns.addWidget(self.optimize_btn)
+        company_btns.addWidget(save_company_btn)
+        company_btns.addStretch(1)
+        company_layout.addLayout(company_btns)
+        layout.addWidget(company_box)
+
+        # ---- 个人资料（底盘，所有面试共用）----
+        personal_box = QGroupBox("个人资料（底盘，所有面试共用）")
+        personal_layout = QVBoxLayout(personal_box)
+
         hint = QLabel(
             "把你的简历、项目细节、技术栈、真实经历和薄弱点写在这里。"
             "面试回答会优先使用这些资料，资料里没有的内容不会编造。"
         )
         hint.setObjectName("hint")
         hint.setWordWrap(True)
-        layout.addWidget(hint)
+        personal_layout.addWidget(hint)
 
         buttons = QHBoxLayout()
         import_btn = QPushButton("导入 txt / md")
@@ -357,7 +511,7 @@ class ControlPanel(QWidget):
         buttons.addWidget(import_btn)
         buttons.addWidget(self.knowledge_enabled)
         buttons.addStretch(1)
-        layout.addLayout(buttons)
+        personal_layout.addLayout(buttons)
 
         self.knowledge_edit = QPlainTextEdit(load_knowledge())
         self.knowledge_edit.setPlaceholderText(
@@ -369,7 +523,13 @@ class ControlPanel(QWidget):
 - 项目难点、踩过的坑、真实数据
 - 不擅长的方向（让 AI 用保守说法，不硬编）"""
         )
-        layout.addWidget(self.knowledge_edit, 1)
+        personal_layout.addWidget(self.knowledge_edit, 1)
+        layout.addWidget(personal_box, 1)
+
+        # 用配置里选好的公司初始化下拉框（不会触发“切换即保存”）
+        self._reload_company_combo(
+            str((self._config.get("knowledge") or {}).get("company", "") or "")
+        )
         return page
 
     def _import_knowledge(self) -> None:
@@ -383,6 +543,148 @@ class ControlPanel(QWidget):
                 QMessageBox.warning(self, "导入失败", f"{path}" + chr(10) + f"{exc}")
                 continue
             self.knowledge_edit.appendPlainText(chr(10) * 2 + text.strip())
+
+    # ---- 公司知识库 ----
+
+    def _current_company(self) -> str:
+        return str(self.company_combo.currentData() or "")
+
+    def _reload_company_combo(self, select: str = "") -> None:
+        self._company_loading = True
+        self.company_combo.clear()
+        self.company_combo.addItem("（未选择公司）", "")
+        for name in list_companies():
+            self.company_combo.addItem(name, name)
+        index = self.company_combo.findData(select)
+        self.company_combo.setCurrentIndex(index if index >= 0 else 0)
+        self._company_loading = False
+        self._company_shown = self._current_company()
+        self.company_edit.setPlainText(load_company(self._company_shown))
+
+    def _persist_company_selection(self, company: str) -> None:
+        """切换公司立刻写配置并通知主窗口，下一句回答就生效。"""
+        self._config.setdefault("knowledge", {})
+        self._config["knowledge"]["company"] = company
+        try:
+            save_config(self._config)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "保存失败", str(exc))
+            return
+        self.config_saved.emit(copy.deepcopy(self._config))
+        if company:
+            self.status_label.setText(f"已切换到：{company}（下一句回答生效）")
+        else:
+            self.status_label.setText("已取消公司选择")
+
+    def _on_company_changed(self, _index: int) -> None:
+        if self._company_loading:
+            return
+        previous = self._company_shown
+        if previous and previous != self._current_company():
+            # 切换前把上一家编辑框里的内容落盘，避免误切换丢资料
+            try:
+                save_company(previous, self.company_edit.toPlainText())
+            except OSError:
+                pass
+        company = self._current_company()
+        self._company_shown = company
+        self.company_edit.setPlainText(load_company(company))
+        self._persist_company_selection(company)
+
+    def _new_company(self) -> None:
+        name, ok = QInputDialog.getText(self, "新建公司", "公司名称（用作资料文件名）：")
+        if not ok:
+            return
+        name = sanitize_company_name(name)
+        if not name:
+            QMessageBox.warning(
+                self, "名称无效", "公司名称不能为空，也不能包含 / \\ 等路径字符。"
+            )
+            return
+        if company_path(name).exists():
+            QMessageBox.warning(self, "已存在", f"“{name}”已存在，直接在下拉框里选择即可。")
+            return
+        try:
+            save_company(name, COMPANY_TEMPLATE.format(company=name))
+        except OSError as exc:
+            QMessageBox.warning(self, "创建失败", str(exc))
+            return
+        self._reload_company_combo(name)
+        self._persist_company_selection(name)
+
+    def _delete_company(self) -> None:
+        name = self._current_company()
+        if not name:
+            return
+        answer = QMessageBox.question(
+            self, "删除公司", f"确定删除“{name}”的公司资料？删除后无法恢复。"
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        delete_company(name)
+        self._reload_company_combo("")
+        self._persist_company_selection("")
+
+    def _save_company_clicked(self) -> None:
+        name = self._current_company()
+        if not name:
+            QMessageBox.warning(self, "未选择公司", "请先新建或选择一个公司。")
+            return
+        try:
+            save_company(name, self.company_edit.toPlainText())
+        except OSError as exc:
+            QMessageBox.warning(self, "保存失败", str(exc))
+            return
+        self.status_label.setText(f"已保存公司资料：{name}")
+
+    def _optimize_company(self) -> None:
+        material = self.company_edit.toPlainText().strip()
+        if not material:
+            QMessageBox.warning(
+                self, "没有材料", "先把公司简介或招聘 JD 粘到上面的编辑框，再点 AI 整理。"
+            )
+            return
+        if self._optimize_worker is not None and self._optimize_worker.isRunning():
+            self.status_label.setText("上一份还在整理，请稍等")
+            return
+        api = self._config.get("text_api") or {}
+        api_key = self.text_key.text().strip() or str(api.get("api_key", "")).strip()
+        if not api_key:
+            QMessageBox.warning(
+                self, "未配置文本模型", "请先在“模型与音频”里填好文本模型的 API Key。"
+            )
+            return
+        client = OpenAICompatibleClient(
+            self.text_base.text().strip() or str(api.get("base_url", "")),
+            api_key,
+            self.text_model.text().strip() or str(api.get("model", "")),
+            timeout=(15.0, 180.0),
+        )
+        system = (self._config.get("prompts") or {}).get("company_optimize", "")
+        personal = self.knowledge_edit.toPlainText().strip()
+        if personal:
+            material += "\n\n【我的个人资料（用来写“我为什么匹配”）】\n" + personal[:2000]
+
+        self.optimize_btn.setEnabled(False)
+        self.status_label.setText("AI 正在整理公司资料…")
+        worker = _OptimizeWorker(client, system, material, self)
+        worker.done.connect(self._on_optimize_done)
+        worker.failed.connect(self._on_optimize_failed)
+        worker.finished.connect(worker.deleteLater)
+        self._optimize_worker = worker
+        worker.start()
+
+    def _on_optimize_done(self, text: str) -> None:
+        self.optimize_btn.setEnabled(True)
+        self._optimize_worker = None
+        self.company_edit.setPlainText(text)
+        self.status_label.setText("AI 整理完成，确认内容后点“保存公司资料”")
+
+    def _on_optimize_failed(self, message: str) -> None:
+        self.optimize_btn.setEnabled(True)
+        self._optimize_worker = None
+        self.status_label.setText("AI 整理失败")
+        QMessageBox.warning(self, "AI 整理失败", message)
 
 
     def _build_prompt_tab(self) -> QWidget:
@@ -458,6 +760,10 @@ class ControlPanel(QWidget):
         )
         config.setdefault("knowledge", {})
         config["knowledge"]["enabled"] = self.knowledge_enabled.isChecked()
+        config["knowledge"]["company"] = self._current_company()
+        config.setdefault("asr_stream", {})
+        if self.stream_model.currentData():
+            config["asr_stream"]["model_dir"] = self.stream_model.currentData()
         config["audio"].update(
             {
                 "source": self.audio_source.currentData(),
@@ -494,15 +800,119 @@ class ControlPanel(QWidget):
         try:
             save_config(config)
             save_knowledge(self.knowledge_edit.toPlainText())
+            company = self._current_company()
+            if company:
+                save_company(company, self.company_edit.toPlainText())
         except Exception as exc:
             QMessageBox.warning(self, "保存失败", str(exc))
             return
         self._config = copy.deepcopy(config)
+        self._company_shown = self._current_company()
         self.status_label.setText("设置已保存")
         self.config_saved.emit(config)
 
     def set_status(self, text: str) -> None:
         self.status_label.setText(text)
+
+    def _set_practice(self, on: bool) -> None:
+        """练习模式：自己当面试官，改用麦克风收音，切换后立即保存并生效。"""
+        source = "microphone" if on else "loopback"
+        box = getattr(self, "audio_source", None)
+        if box is not None:
+            index = box.findData(source)
+            if index >= 0 and box.currentIndex() != index:
+                box.blockSignals(True)
+                box.setCurrentIndex(index)
+                box.blockSignals(False)
+        config = self.collect_config()
+        try:
+            save_config(config)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "切换失败", str(exc))
+            return
+        self._config = copy.deepcopy(config)
+        self.status_label.setText(
+            "练习模式：正在聆听你的提问" if on else "已切回系统声音（正常面试）"
+        )
+        self.config_saved.emit(config)
+        # 勾选练习模式就直接开始听，省得再点一次“开始监听”
+        if on and not self.stop_btn.isEnabled():
+            self.start_listen.emit()
+
+    def _open_setup(self) -> None:
+        """一键初始化：下载语音模型，下完自动检测环境。"""
+        dialog = SetupDialog(self.collect_config(), self)
+        dialog.model_ready.connect(self._on_setup_model_ready)
+        dialog.exec()
+
+    def _check_environment(self) -> None:
+        results = check_environment(self.collect_config())
+        level = overall_level(results)
+        QMessageBox.information(
+            self,
+            "环境检测",
+            LEVEL_TEXT.get(level, "") + "\n\n" + format_results(results),
+        )
+
+    def _on_setup_model_ready(self, rel_dir: str) -> None:
+        """初始化下载完模型后，自动选中并立刻生效。"""
+        self._refresh_stream_models(rel_dir)
+        config = self.collect_config()
+        try:
+            save_config(config)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "保存失败", str(exc))
+            return
+        self._config = copy.deepcopy(config)
+        self.status_label.setText("语音模型已就绪，已自动切换")
+        self.config_saved.emit(config)
+
+    def _refresh_stream_models(self, select: str = "") -> None:
+        if not hasattr(self, "stream_model"):
+            return
+        want = select or str(self.stream_model.currentData() or "")
+        self.stream_model.blockSignals(True)
+        self.stream_model.clear()
+        self._populate_stream_models(want)
+        self.stream_model.blockSignals(False)
+
+    def _populate_stream_models(self, select: str = "") -> None:
+        """列出 models/ 下可用的本地流式模型，切换后重启监听生效。"""
+        current = select or str(
+            (self._config.get("asr_stream") or {}).get("model_dir") or ""
+        )
+        found = []
+        models_dir = APP_DIR / "models"
+        if models_dir.is_dir():
+            for item in sorted(models_dir.iterdir()):
+                if item.is_dir() and (item / "tokens.txt").exists():
+                    found.append(f"models/{item.name}")
+        if current and current not in found:
+            found.insert(0, current)
+        for rel in found:
+            self.stream_model.addItem(self._model_label(rel), rel)
+        index = self.stream_model.findData(current)
+        if index >= 0:
+            self.stream_model.setCurrentIndex(index)
+
+    @staticmethod
+    def _model_label(rel_path: str) -> str:
+        name = Path(rel_path).name
+        if "2025-06-30" in name and "zh" in name:
+            return "中文高精度（2025 版，英文弱）"
+        if "bilingual" in name:
+            return "中英双语（2023 版，较快）"
+        return name
+
+    def _on_source_changed(self, _index: int) -> None:
+        """在“模型与音频”页手动改声音来源时，同步控制页的练习模式开关。"""
+        source = self.audio_source.currentData()
+        self._config["audio"]["source"] = source
+        box = getattr(self, "practice_ctrl", None)
+        if box is not None and box.isChecked() != (source == "microphone"):
+            box.blockSignals(True)
+            box.setChecked(source == "microphone")
+            box.blockSignals(False)
 
     def _set_auto(self, on: bool) -> None:
         on = bool(on)
